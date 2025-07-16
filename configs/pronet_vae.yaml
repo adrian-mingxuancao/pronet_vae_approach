@@ -1,0 +1,138 @@
+# Configuration for ProteiNet + VAE + ESM-Fold Structure Tokenization
+# This replaces the current GVP + LFQ + ESM-Fold pipeline with:
+# - GVP → ProteiNet (better 3D geometric modeling)
+# - LFQ → VAE (more stable training)
+
+model:
+  _target_: pronet_vae_approach.models.structok_pronet_vae.ProNetVAEModel
+  
+  # ProteiNet Encoder Configuration (replaces GVP)
+  encoder_config:
+    level: "aminoacid"           # Protein representation level
+    num_blocks: 4                # Number of interaction blocks
+    hidden_channels: 128         # Hidden embedding size
+    out_channels: 1              # Output channels
+    mid_emb: 64                  # Geometric feature embedding size
+    num_radial: 6                # Number of radial basis functions
+    num_spherical: 2             # Number of spherical harmonics
+    cutoff: 10.0                 # Cutoff distance for interactions
+    max_num_neighbors: 32        # Max number of neighbors
+    int_emb_layers: 3            # Interaction embedding layers
+    out_layers: 2                # Output layers
+    num_pos_emb: 16              # Positional embeddings
+    dropout: 0.1                 # Dropout rate
+    data_augment_eachlayer: false # Data augmentation
+    final_pred: false            # Final prediction layer
+    out_hidden_channels: 2048    # Output hidden channels
+    pool: false                  # Global pooling
+  
+  # ESM-Fold Decoder Configuration (same as DPLM-2)
+  decoder_config:
+    input_dim: 256               # Input dimension for ESM-Fold
+    trunk:
+      sequence_state_dim: 384    # Single representation dimension
+      pairwise_state_dim: 128    # Pair representation dimension
+      structure_module:
+        c_s: 384                 # Single representation dimension
+        c_z: 128                 # Pair representation dimension
+        c_ipa: 16                # IPA hidden dimension
+        c_resnet: 128            # ResNet dimension
+        no_heads_ipa: 12         # Number of IPA heads
+        no_qk_points: 4          # Number of query/key points
+        no_v_points: 8           # Number of value points
+        dropout_rate: 0.1        # Dropout rate
+        no_blocks: 8             # Number of structure blocks
+        no_transition_layers: 1  # Number of transition layers
+        no_resnet_blocks: 2      # Number of ResNet blocks
+        no_angles: 7             # Number of torsion angles
+        trans_scale_factor: 10   # Translation scale factor
+        epsilon: 1e-8            # Epsilon for numerical stability
+        inf: 1e5                 # Infinity value
+    lddt_head_hid_dim: 128       # LDDT head hidden dimension
+    use_esm_attn_map: false      # Use ESM attention map
+  
+  # VAE Codebook Configuration (replaces LFQ)
+  codebook_config:
+    embed_dim: 128               # Embedding dimension
+    num_codes: 512               # Number of codebook entries
+    beta: 0.25                   # Commitment loss weight
+    entropy_loss_weight: 0.1     # Entropy loss weight
+    commitment_loss_weight: 0.25 # Commitment loss weight
+    freeze: false                # Freeze codebook during training
+
+# Training Configuration
+trainer:
+  max_epochs: 100
+  accelerator: "gpu"
+  devices: 1
+  precision: 16
+  
+  # Learning rate
+  lr: 1e-4
+  
+  # Optimizer
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 1e-4
+    weight_decay: 0.01
+  
+  # Scheduler
+  scheduler:
+    _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+    T_max: 100
+    eta_min: 1e-6
+
+# Data Configuration
+data:
+  batch_size: 8
+  num_workers: 4
+  max_length: 1000
+  
+  # Dataset paths
+  train_data_path: "/path/to/train/data"
+  val_data_path: "/path/to/val/data"
+  test_data_path: "/path/to/test/data"
+
+# Loss Configuration
+loss:
+  # Structure reconstruction loss
+  structure_loss_weight: 1.0
+  
+  # VAE losses
+  vae_loss_weight: 1.0
+  
+  # Additional losses can be added here
+  # e.g., sequence consistency, geometric constraints, etc.
+
+# Logging and Monitoring
+logging:
+  log_every_n_steps: 100
+  save_every_n_epochs: 10
+  
+  # Metrics to track
+  metrics:
+    - "train_loss"
+    - "val_loss"
+    - "structure_rmsd"
+    - "codebook_usage"
+    - "perplexity"
+
+# Model Checkpointing
+checkpoint:
+  save_top_k: 3
+  monitor: "val_loss"
+  mode: "min"
+  
+# Inference Configuration
+inference:
+  # Tokenization parameters
+  max_tokens: 1000
+  
+  # Decoding parameters
+  temperature: 1.0
+  top_k: 50
+  top_p: 0.9
+  
+  # Structure generation parameters
+  num_samples: 1
+  use_esm_refinement: true 
