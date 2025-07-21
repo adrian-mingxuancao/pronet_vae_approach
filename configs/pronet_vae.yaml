@@ -89,9 +89,9 @@ data:
   max_length: 1000
   
   # Dataset paths
-  train_data_path: "/path/to/train/data"
-  val_data_path: "/path/to/val/data"
-  test_data_path: "/path/to/test/data"
+  train_data_path: "/home/caom/AID3/protein-dit/data/protein_train/processed/protein_train_split.pt"
+  val_data_path: "/home/caom/AID3/protein-dit/data/protein_train/processed/protein_val_split.pt"
+  test_data_path: "/home/caom/AID3/protein-dit/data/protein_train/processed/protein_test_split.pt"
 
 # Loss Configuration
 loss:

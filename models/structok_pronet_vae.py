@@ -22,11 +22,11 @@ from byprot.datamodules.pdb_dataset.pdb_datamodule import (
 )
 from byprot.models import register_model
 
-from .modules.ema import LitEma
-from .modules.vqvae import VectorQuantizer2
-from .modules.folding_utils.decoder import ESMFoldStructureDecoder as Decoder
-from .modules.pronet_converter import ProNetConverter, create_pronet_input_from_batch
-from .modules.nn import TransformerEncoder
+from modules.ema import LitEma
+from modules.vqvae import VectorQuantizer2
+from modules.folding_utils.decoder import ESMFoldStructureDecoder as Decoder
+from modules.pronet_converter import ProNetConverter, create_pronet_input_from_batch
+from modules.nn import TransformerEncoder
 
 
 def exists(o):
@@ -67,8 +67,8 @@ class ProNetVAEModel(nn.Module):
         use_ema=False,
     ):
         super().__init__()
-        self.codebook_embed_dim = codebook_config.embed_dim
-        self.num_codebook = codebook_config.num_codes
+        self.codebook_embed_dim = codebook_config.get('embed_dim', 128)
+        self.num_codebook = codebook_config.get('num_codes', 512)
         self.image_key = image_key
         
         # 1. ProteiNet Encoder (replaces GVP)

@@ -360,8 +360,12 @@ class VectorQuantizer2(nn.Module):
 
         min_encoding_indices = torch.argmin(d, dim=1)
         z_q = self.embedding(min_encoding_indices).view(z.shape)
-        perplexity = None
-        min_encodings = None
+
+        # Perplexity calculation (added)
+        one_hot = F.one_hot(min_encoding_indices, num_classes=self.n_e).float()
+        avg_probs = one_hot.mean(dim=0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+        min_encodings = one_hot
 
         def _masked_mean(t, m):
             if m is None:

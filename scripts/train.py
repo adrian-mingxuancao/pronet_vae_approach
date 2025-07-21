@@ -11,7 +11,12 @@ Usage:
     python train.py --config configs/pronet_vae.yaml
 """
 
+# Set PYTHONPATH for OpenFold CUDA extensions BEFORE any imports
 import os
+if 'PYTHONPATH' not in os.environ:
+    os.environ['PYTHONPATH'] = ''
+os.environ['PYTHONPATH'] = '/home/caom/.cache/torch_extensions/py39_cu121/attn_core_inplace_cuda:' + os.environ['PYTHONPATH']
+
 import sys
 import argparse
 import yaml
@@ -19,13 +24,65 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
+import json
+from pathlib import Path
+from torch_geometric.data import Data, InMemoryDataset
+from torch_geometric.loader import DataLoader
 
 # Add current directory to path
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from models.structok_pronet_vae import ProNetVAEModel
-from byprot.datamodules.pdb_dataset.pdb_datamodule import PdbDataModule
 from byprot.tasks.struct_tokenizer.structok import StrucTok
+
+class ProteinDataset(InMemoryDataset):
+    def __init__(self, data_path: str, transform=None):
+        super().__init__(None, transform)
+        self.data_path = data_path
+        self._data, self.slices = torch.load(data_path)
+        self.num_proteins = len(self.slices['x']) - 1
+
+    def len(self):
+        return self.num_proteins
+
+    def get(self, idx):
+        start_idx = self.slices['x'][idx]
+        end_idx = self.slices['x'][idx + 1]
+        protein_data = Data()
+        for key in self._data.keys:
+            if isinstance(self._data[key], torch.Tensor):
+                protein_data[key] = self._data[key][start_idx:end_idx]
+            else:
+                protein_data[key] = self._data[key]
+        if not hasattr(protein_data, 'node_mask'):
+            protein_data.node_mask = torch.ones(protein_data.num_nodes, dtype=torch.bool)
+        # Optionally add edge construction here if needed
+        return protein_data
+
+class ProteinDataModule(pl.LightningDataModule):
+    def __init__(self, train_path, val_path, test_path=None, batch_size=2, num_workers=2):
+        super().__init__()
+        self.train_path = train_path
+        self.val_path = val_path
+        self.test_path = test_path
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def setup(self, stage=None):
+        self.train_dataset = ProteinDataset(self.train_path)
+        self.val_dataset = ProteinDataset(self.val_path)
+        self.test_dataset = ProteinDataset(self.test_path) if self.test_path else None
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+
+    def test_dataloader(self):
+        if self.test_dataset:
+            return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return None
 
 
 class ProNetVAETask(StrucTok):
@@ -134,23 +191,20 @@ def load_config(config_path):
 def create_model(config):
     """Create the ProteiNet + VAE + ESM-Fold model"""
     model_config = config['model']
+    model_config.pop('_target_', None)
     model = ProNetVAEModel(**model_config)
     return model
 
 
 def create_datamodule(config):
-    """Create data module"""
     data_config = config['data']
-    
-    datamodule = PdbDataModule(
+    datamodule = ProteinDataModule(
+        train_path=data_config['train_data_path'],
+        val_path=data_config['val_data_path'],
+        test_path=data_config.get('test_data_path'),
         batch_size=data_config['batch_size'],
         num_workers=data_config['num_workers'],
-        max_length=data_config['max_length'],
-        train_data_path=data_config['train_data_path'],
-        val_data_path=data_config['val_data_path'],
-        test_data_path=data_config.get('test_data_path'),
     )
-    
     return datamodule
 
 
