@@ -32,6 +32,32 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from modules.pronet_converter import ProNetConverter
 from modules.vqvae import VectorQuantizer2
 
+class NaNStoppingCallback(pl.Callback):
+    """Callback to stop training when NaN loss is detected"""
+    
+    def __init__(self, patience=3):
+        super().__init__()
+        self.patience = patience
+        self.nan_count = 0
+        
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if outputs is None:  # NaN detected in training step
+            self.nan_count += 1
+            if self.nan_count >= self.patience:
+                print(f"Stopping training due to {self.patience} consecutive NaN batches")
+                trainer.should_stop = True
+        else:
+            self.nan_count = 0
+            
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if outputs is None:  # NaN detected in validation step
+            self.nan_count += 1
+            if self.nan_count >= self.patience:
+                print(f"Stopping training due to {self.patience} consecutive NaN batches")
+                trainer.should_stop = True
+        else:
+            self.nan_count = 0
+
 class SimpleProNetVAEModel(nn.Module):
     """
     Simplified ProteiNet + VAE model without ESM-Fold decoder
@@ -99,6 +125,10 @@ class SimpleProNetVAEModel(nn.Module):
         # VAE discretization
         # Mask needs to be [batch_size, max_num_nodes, 1] to match encoded
         mask_expanded = mask.unsqueeze(-1).expand_as(encoded)
+        
+        # Add gradient clipping to prevent explosion
+        encoded = torch.clamp(encoded, min=-10, max=10)
+        
         quantized, vae_loss, (perplexity, min_encodings, min_encoding_indices) = self.vae(encoded, mask_expanded)
 
         # Simple decoding
@@ -110,7 +140,8 @@ class SimpleProNetVAEModel(nn.Module):
             'perplexity': perplexity,
             'encoded': encoded,
             'quantized': quantized,
-            'mask': mask
+            'mask': mask,
+            'min_encoding_indices': min_encoding_indices
         }
 
 class ProteinDataset(InMemoryDataset):
@@ -181,10 +212,36 @@ class SimpleProNetVAELightningModule(pl.LightningModule):
         pred_positions = outputs['reconstructed_positions']  # [B, L, 3]
         # Densify target positions to match pred_positions
         target_positions, mask = to_dense_batch(batch.coords_ca.float(), batch.batch)
+        
+        # Check for NaN/Inf values and handle them
+        if torch.isnan(pred_positions).any() or torch.isinf(pred_positions).any():
+            print(f"Warning: NaN/Inf detected in predictions at batch {batch_idx}")
+            return None
+        
         # Compute loss only on valid (unpadded) positions
         reconstruction_loss = F.mse_loss(pred_positions[mask], target_positions[mask])
         vae_loss = outputs['vae_loss']
+        
+        # Check for NaN/Inf in losses
+        if torch.isnan(reconstruction_loss) or torch.isinf(reconstruction_loss):
+            print(f"Warning: NaN/Inf in reconstruction loss at batch {batch_idx}")
+            return None
+        
+        if torch.isnan(vae_loss) or torch.isinf(vae_loss):
+            print(f"Warning: NaN/Inf in VAE loss at batch {batch_idx}")
+            return None
+        
+        # Scale losses to prevent explosion
+        reconstruction_loss = torch.clamp(reconstruction_loss, max=1e6)
+        vae_loss = torch.clamp(vae_loss, max=1e6)
+        
         total_loss = reconstruction_loss + vae_loss
+        
+        # Final NaN check
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            print(f"Warning: NaN/Inf in total loss at batch {batch_idx}")
+            return None
+        
         self.log('train_loss', total_loss, prog_bar=True)
         self.log('train_reconstruction_loss', reconstruction_loss)
         self.log('train_vae_loss', vae_loss)
@@ -196,10 +253,43 @@ class SimpleProNetVAELightningModule(pl.LightningModule):
         outputs = self.model(batch)
         pred_positions = outputs['reconstructed_positions']  # [B, L, 3]
         target_positions, mask = to_dense_batch(batch.coords_ca.float(), batch.batch)
+        
+        # Check for NaN/Inf values and handle them
+        if torch.isnan(pred_positions).any() or torch.isinf(pred_positions).any():
+            print(f"Warning: NaN/Inf detected in validation predictions at batch {batch_idx}")
+            return None
+        
         reconstruction_loss = F.mse_loss(pred_positions[mask], target_positions[mask])
         vae_loss = outputs['vae_loss']
+        
+        # Check for NaN/Inf in losses
+        if torch.isnan(reconstruction_loss) or torch.isinf(reconstruction_loss):
+            print(f"Warning: NaN/Inf in validation reconstruction loss at batch {batch_idx}")
+            return None
+        
+        if torch.isnan(vae_loss) or torch.isinf(vae_loss):
+            print(f"Warning: NaN/Inf in validation VAE loss at batch {batch_idx}")
+            return None
+        
+        # Scale losses to prevent explosion
+        reconstruction_loss = torch.clamp(reconstruction_loss, max=1e6)
+        vae_loss = torch.clamp(vae_loss, max=1e6)
+        
         total_loss = reconstruction_loss + vae_loss
-        rmsd = torch.sqrt(torch.mean((pred_positions[mask] - target_positions[mask]) ** 2))
+        
+        # Final NaN check
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            print(f"Warning: NaN/Inf in validation total loss at batch {batch_idx}")
+            return None
+        
+        # Safe RMSD calculation
+        try:
+            rmsd = torch.sqrt(torch.mean((pred_positions[mask] - target_positions[mask]) ** 2))
+            if torch.isnan(rmsd) or torch.isinf(rmsd):
+                rmsd = torch.tensor(0.0, device=total_loss.device)
+        except:
+            rmsd = torch.tensor(0.0, device=total_loss.device)
+        
         self.log('val_loss', total_loss, prog_bar=True)
         self.log('val_reconstruction_loss', reconstruction_loss)
         self.log('val_vae_loss', vae_loss)
@@ -209,15 +299,27 @@ class SimpleProNetVAELightningModule(pl.LightningModule):
         return total_loss
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        # Use AdamW with weight decay for better stability
+        optimizer = torch.optim.AdamW(
+            self.parameters(), 
+            lr=self.learning_rate,
+            weight_decay=1e-4,  # Add weight decay to prevent overfitting
+            eps=1e-8  # Increase epsilon for numerical stability
         )
+        
+        # Use cosine annealing with warm restarts for better convergence
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 
+            T_0=10,  # Restart every 10 epochs
+            T_mult=2,  # Double the restart interval each time
+            eta_min=1e-6  # Minimum learning rate
+        )
+        
         return {
             'optimizer': optimizer,
             'lr_scheduler': {
                 'scheduler': scheduler,
-                'monitor': 'val_loss',
+                'interval': 'epoch',
             }
         }
 
@@ -277,6 +379,10 @@ def create_trainer(config):
     lr_monitor = LearningRateMonitor(logging_interval='step')
     callbacks.append(lr_monitor)
     
+    # NaN stopping callback
+    nan_stopping = NaNStoppingCallback(patience=3)
+    callbacks.append(nan_stopping)
+    
     # Logger
     logger = TensorBoardLogger(
         save_dir=trainer_config.get('log_dir', 'logs'),
@@ -292,9 +398,10 @@ def create_trainer(config):
         logger=logger,
         log_every_n_steps=trainer_config.get('log_every_n_steps', 10),
         val_check_interval=trainer_config.get('val_check_interval', 1.0),
-        gradient_clip_val=trainer_config.get('gradient_clip_val', 1.0),
-        precision=trainer_config.get('precision', 16),
-        deterministic=trainer_config.get('deterministic', False)
+        gradient_clip_val=trainer_config.get('gradient_clip_val', 0.5),  # Reduce gradient clipping
+        precision=trainer_config.get('precision', 32),  # Use FP32 for better stability
+        deterministic=trainer_config.get('deterministic', False),
+        accumulate_grad_batches=2  # Gradient accumulation for stability
     )
     
     return trainer

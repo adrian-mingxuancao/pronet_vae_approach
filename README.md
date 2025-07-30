@@ -40,6 +40,27 @@ python scripts/train.py --config configs/pronet_vae.yaml
 python scripts/demo.py --config configs/pronet_vae.yaml --device cuda
 ```
 
+### Interactive Evaluation
+
+For interactive evaluation on a GPU node:
+
+```bash
+# Get an interactive GPU node
+srun -p general --gres=gpu:1 --pty --mem 32G -t 1:00:00 /bin/bash
+
+# Once you get the node, activate environment and test:
+conda activate /net/scratch/caom/dplm_env
+export PYTHONPATH=/home/caom/.cache/torch_extensions/py39_cu121/attn_core_inplace_cuda:$PYTHONPATH
+
+# Test the evaluation script
+python evaluate_simple.py \
+    --config ../configs/pronet_vae.yaml \
+    --checkpoint checkpoints/pronet_vae-epoch=02-val_loss=579.6155.ckpt \
+    --data_path /home/caom/AID3/protein-dit/data/protein_train/processed/protein_test_split.pt \
+    --output evaluation_results.txt \
+    --batch_size 4
+```
+
 ## What the Training Script Does
 
 The `train.py` script trains the **entire encode-decode pipeline**:
